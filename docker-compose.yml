@@ -1,0 +1,38 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: viavds
+      POSTGRES_USER: viavds
+      POSTGRES_PASSWORD: viavds_pass
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viavds"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  viavds:
+    build: .
+    environment:
+      PORT: 14127
+      NODE_ENV: production
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: viavds
+      DATABASE_USER: viavds
+      DATABASE_PASS: viavds_pass
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "14127:14127"
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+
+volumes:
+  pgdata:

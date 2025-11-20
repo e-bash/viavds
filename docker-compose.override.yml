@@ -1,0 +1,19 @@
+version: "3.8"
+services:
+  viavds:
+    build:
+      context: .
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    command: sh -c "yarn install --frozen-lockfile || npm install && yarn dev || npm run dev"
+    ports:
+      - "14127:14127"
+    depends_on:
+      - postgres
+    restart: "no"
+  postgres:
+    ports:
+      - "5432:5432"
