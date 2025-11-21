@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
-# viavds.sh -- diagnostics & unified installer for viavds (WSL-safe)
-# v0.6.0
+# viavds.sh -- unified installer & status tool for viavds
+# Version: 0.9.0
+# - single-file installer: status | install
+# - WSL-safe: will not try to apt-install Docker Engine on WSL/macOS
+# - cloudflared installation via GitHub API fallback
+# - optional Docker Desktop (Windows) install via winget (requires --yes)
+# - mkcert support, nginx vhost generation, hosts file helper
+# - non-interactive flags supported: --yes, --dry-run, --verbose
+#
+# Usage examples:
+#   curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- status
+#   curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- install --dir /home/serge/viavds --webhook-host wh.vianl.loc --tunnel-host ngrok.vianl.loc --mkcert --cf-tunnel --yes
+#
 set -euo pipefail
 IFS=$'\n\t'
 
-VER="0.6.0"
-SCRIPT_NAME=$(basename "$0")
+# metadata
+VER="0.9.0"
+SCRIPT_NAME="$(basename "$0")"
 
-# Colors
+# colors
 _info(){ printf "\e[1;34m%s\e[0m\n" "$*"; }
 _ok(){ printf "\e[1;32m%s\e[0m\n" "$*"; }
 _warn(){ printf "\e[1;33m%s\e[0m\n" "$*"; }
@@ -30,22 +42,26 @@ Options (install/status):
   --branch BRANCH        Repo branch (default main)
   --webhook-host HOST    Hostname for webhook/API endpoint (e.g. wh.example.com)
   --tunnel-host HOST     Hostname for tunnel (e.g. ngrok.example.com)
-  --cf-token TOKEN       Cloudflare API token (optional)
-  --cf-account ID        Cloudflare account id (optional)
+  --cf-token TOKEN       Cloudflare API token (optional, only for advanced)
   --port N               Service port (default: 14127)
   --mkcert               (local) install and run mkcert to generate certs for webhook-host
-  --cf-tunnel            prepare cloudflared client (local) or service (public)
-  --install-docker       allow installing docker (ignored on WSL/macos)
-  --install-nginx        allow installing nginx
-  --yes                  non-interactive: auto-accept prompts
+  --cf-tunnel            prepare cloudflared config
+  --install-docker       allow installing docker (ignored on WSL/macos unless --yes and Windows winget available)
+  --install-nginx        allow installing nginx (server mode)
+  --yes                  non-interactive: auto-accept prompts and allow certain automated installs
   --dry-run              show actions without executing
   --verbose              verbose mode
   -h, --help             show this help
+
+Examples:
+  $SCRIPT_NAME status
+  $SCRIPT_NAME install --dir /opt/viavds --webhook-host wh.vianl.loc --tunnel-host ngrok.vianl.loc --mkcert --cf-tunnel --yes
+
 EOF
   exit 0
 }
 
-# Auto-elevate
+# auto-elevate to root if not root (many ops require root)
 if [[ $EUID -ne 0 ]]; then
   if command -v sudo >/dev/null 2>&1; then
     exec sudo bash "$0" "$@"
@@ -55,7 +71,7 @@ if [[ $EUID -ne 0 ]]; then
   fi
 fi
 
-# Defaults
+# defaults
 CMD="status"
 PROJECT_DIR=""
 REPO_URL="https://github.com/e-bash/viavds.git"
@@ -63,21 +79,20 @@ BRANCH="main"
 WEBHOOK_HOST=""
 TUNNEL_HOST=""
 CF_TOKEN=""
-CF_ACCOUNT=""
 PORT=14127
 DO_MKCERT=false
 DO_CFTUNNEL=false
 ALLOW_INSTALL_DOCKER=false
 ALLOW_INSTALL_NGINX=false
-DRY_RUN=false
 ASSUME_YES=false
+DRY_RUN=false
 VERBOSE=false
 
-# Counters
+# counters
 WARN_COUNT=0
 ERR_COUNT=0
 
-# Helpers
+# Utilities
 has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 run_cmd(){
   if $DRY_RUN; then
@@ -85,61 +100,31 @@ run_cmd(){
     return 0
   fi
   if $VERBOSE; then
-    echo "+ $*"
-    eval "$@"
+    _info "+ $*"; eval "$@"
   else
-    eval "$@" >/dev/null 2>&1 || return $?
+    eval "$@" >/dev/null 2>&1
   fi
 }
 
-PROJECT_DIRS=( "." "/opt/viavds" "/srv/viavds" "$HOME/viavds" )
-
-# Activate URL helper (prints URL + QR if qrencode available)
-activate_url() {
-  local url
-  if [ "$#" -ge 1 ] && [ -n "$1" ]; then url="$1"; else url="$(cat - 2>/dev/null)"; fi
-  url="${url#"${url%%[![:space:]]*}"}"
-  url="${url%"${url##*[![:space:]]}"}"
-  printf '\nДля активации сервиса перейдите по ссылке %s\n\n' "$url"
-  if command -v qrencode >/dev/null 2>&1; then
-    qrencode -o - -t UTF8 "$url" 2>/dev/null || qrencode -o - -t ANSIUTF8 "$url" 2>/dev/null
-    printf '\n'
-  fi
-}
-
-# pkg manager detection (sets PKG_MANAGER, PKG_INSTALL_CMD, PKG_UPDATE_CMD)
+# pkg manager autodetect
 detect_pkg_manager(){
   PKG_MANAGER="unknown"
   PKG_INSTALL_CMD=""
   PKG_UPDATE_CMD=""
   if has_cmd brew; then
-    PKG_MANAGER="brew"
-    PKG_INSTALL_CMD="brew install"
-    PKG_UPDATE_CMD="brew update"
+    PKG_MANAGER="brew"; PKG_INSTALL_CMD="brew install"; PKG_UPDATE_CMD="brew update"
   elif has_cmd apt-get; then
-    PKG_MANAGER="apt"
-    PKG_INSTALL_CMD="DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends"
-    PKG_UPDATE_CMD="apt-get update -qq"
+    PKG_MANAGER="apt"; PKG_INSTALL_CMD="DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends"; PKG_UPDATE_CMD="apt-get update -qq"
   elif has_cmd dnf; then
-    PKG_MANAGER="dnf"
-    PKG_INSTALL_CMD="dnf install -y -q"
-    PKG_UPDATE_CMD="dnf makecache -q"
+    PKG_MANAGER="dnf"; PKG_INSTALL_CMD="dnf install -y -q"; PKG_UPDATE_CMD="dnf makecache -q"
   elif has_cmd yum; then
-    PKG_MANAGER="yum"
-    PKG_INSTALL_CMD="yum install -y -q"
-    PKG_UPDATE_CMD="yum makecache -q"
+    PKG_MANAGER="yum"; PKG_INSTALL_CMD="yum install -y -q"; PKG_UPDATE_CMD="yum makecache -q"
   elif has_cmd pacman; then
-    PKG_MANAGER="pacman"
-    PKG_INSTALL_CMD="pacman -S --noconfirm --quiet"
-    PKG_UPDATE_CMD="pacman -Sy --noconfirm"
+    PKG_MANAGER="pacman"; PKG_INSTALL_CMD="pacman -S --noconfirm --quiet"; PKG_UPDATE_CMD="pacman -Sy --noconfirm"
   elif has_cmd apk; then
-    PKG_MANAGER="apk"
-    PKG_INSTALL_CMD="apk add --no-cache -q"
-    PKG_UPDATE_CMD="apk update -q"
+    PKG_MANAGER="apk"; PKG_INSTALL_CMD="apk add --no-cache -q"; PKG_UPDATE_CMD="apk update -q"
   elif has_cmd zypper; then
-    PKG_MANAGER="zypper"
-    PKG_INSTALL_CMD="zypper install -y -q"
-    PKG_UPDATE_CMD="zypper refresh -q"
+    PKG_MANAGER="zypper"; PKG_INSTALL_CMD="zypper install -y -q"; PKG_UPDATE_CMD="zypper refresh -q"
   else
     PKG_MANAGER="unknown"
   fi
@@ -159,20 +144,18 @@ pkg_install(){
     return 0
   fi
   case "$PKG_MANAGER" in
-    apt|dnf|yum|pacman|apk|zypper)
-      run_cmd $PKG_UPDATE_CMD || true
-      ;;
+    apt|dnf|yum|pacman|apk|zypper) run_cmd $PKG_UPDATE_CMD || true;;
   esac
   if ! run_cmd $PKG_INSTALL_CMD "${pkgs[@]}"; then
     _err "Failed to install packages: ${pkgs[*]}"
-    ((ERR_COUNT++))
-    return 1
+    ((ERR_COUNT++)); return 1
   fi
   _ok "Installed: ${pkgs[*]}"
   return 0
 }
 
-# find project dir
+# find project dir heuristics
+PROJECT_DIRS=( "." "/opt/viavds" "/srv/viavds" "$HOME/viavds" )
 find_project_dir(){
   if [[ -n "$PROJECT_DIR" ]]; then
     if [[ -f "$PROJECT_DIR/docker-compose.yml" ]]; then
@@ -187,7 +170,7 @@ find_project_dir(){
       echo "$(cd "$d" && pwd)"; return 0
     fi
   done
-  # search upward
+  # walk up from cwd
   local cur="$PWD"
   while [[ "$cur" != "/" ]]; do
     if [[ -f "$cur/docker-compose.yml" ]]; then
@@ -199,197 +182,104 @@ find_project_dir(){
   return 1
 }
 
+# port listening check
 is_port_listening(){
   local port="$1"
-  if has_cmd ss; then
-    ss -ltn | grep -q ":$port" && return 0 || return 1
-  elif has_cmd netstat; then
-    netstat -lnt | grep -q ":$port" && return 0 || return 1
+  if has_cmd ss; then ss -ltn | grep -q ":$port" && return 0 || return 1
+  elif has_cmd netstat; then netstat -lnt | grep -q ":$port" && return 0 || return 1
   fi
   return 2
 }
 
-# detect env (wsl/local/public)
+# detect environment: local (wsl/mac/other) or public
 detect_environment(){
-  # WSL
-  if [[ -f /proc/version ]] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
-    echo "local (wsl)"
-    return 0
-  fi
+  # WSL detection
+  if [[ -f /proc/version ]] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then echo "local (wsl)"; return 0; fi
   # macOS
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    echo "local (macos)"; return 0
-  fi
+  if [[ "$(uname -s)" == "Darwin" ]]; then echo "local (macos)"; return 0; fi
+  # public detection via public IP
   local pubip=""
-  if has_cmd curl; then
-    pubip=$(curl -fsS --max-time 2 https://ifconfig.co || true)
-  fi
-  if [[ -z "$pubip" ]]; then
-    echo "local"; return 0
-  fi
-  # private ranges -> local
-  if [[ "$pubip" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1]) ]]; then
-    echo "local"; return 0
-  fi
+  if has_cmd curl; then pubip=$(curl -fsS --max-time 2 https://ifconfig.co || true); fi
+  if [[ -z "$pubip" ]]; then echo "local"; return 0; fi
+  if [[ "$pubip" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1]) ]]; then echo "local"; return 0; fi
   echo "public"; return 0
 }
 
-# --------- checks (status) ----------
-check_basic_tools(){
-  for cmd in curl jq git; do
-    if has_cmd "$cmd"; then
-      _ok "$cmd: ok"
-    else
-      _warn "$cmd: missing"
-      ((WARN_COUNT++))
-    fi
-  done
-}
-
-check_docker(){
-  if ! has_cmd docker; then
-    _warn "docker: not installed"
-    ((WARN_COUNT++))
-    DOCKER_PRESENT=false; DOCKER_RUNNING=false; return 1
-  fi
-  DOCKER_PRESENT=true
-  docker --version 2>/dev/null || true
-  if has_cmd systemctl && systemctl is-active --quiet docker; then
-    _ok "docker daemon: running"
-    DOCKER_RUNNING=true
-  else
-    if pgrep -x dockerd >/dev/null 2>&1; then
-      _ok "docker daemon: running (no systemd)"
-      DOCKER_RUNNING=true
-    else
-      _warn "docker daemon: not running"
-      DOCKER_RUNNING=false
-      ((WARN_COUNT++))
-    fi
-  fi
-}
-
-check_compose(){
-  if has_cmd docker && docker compose version >/dev/null 2>&1; then
-    _ok "docker compose: present"
-  else
-    _warn "docker compose (v2) not present"
-    ((WARN_COUNT++))
-  fi
-}
-
-check_viavds_container(){
-  if ! $DOCKER_PRESENT; then
-    _warn "viavds container: check skipped (docker not present)"
-    ((WARN_COUNT++)); return
-  fi
-  local info
-  info=$(docker ps --filter "name=viavds" --format "name={{.Names}} status={{.Status}} ports={{.Ports}}" | head -n1 || true)
-  if [[ -n "$info" ]]; then
-    _ok "viavds container: $info"
-  else
-    info=$(docker ps -a --filter "name=viavds" --format "name={{.Names}} status={{.Status}}" | head -n1 || true)
-    if [[ -n "$info" ]]; then
-      _warn "viavds container present but stopped: $info"
-      ((WARN_COUNT++))
-    else
-      _warn "viavds container not found"
-      ((WARN_COUNT++))
-    fi
-  fi
-}
-
-check_images(){
-  local dir="$1"
-  if [[ -z "$dir" ]]; then
-    _warn "Images: skip (no compose file)"
-    ((WARN_COUNT++)); return
-  fi
-  if ! $DOCKER_PRESENT; then
-    _warn "Images: skipped (docker not present)"; ((WARN_COUNT++)); return
-  fi
-  local imgs; imgs=( $(awk '/image:/ {print $2}' "$dir/docker-compose.yml" || true) )
-  if [[ ${#imgs[@]} -eq 0 ]]; then
-    _warn "Images: none declared in compose"
-    ((WARN_COUNT++)); return
-  fi
-  for im in "${imgs[@]}"; do
-    if docker image inspect "$im" >/dev/null 2>&1; then
-      _ok "Image present: $im"
-    else
-      _warn "Image missing: $im"
-      ((WARN_COUNT++))
-    fi
-  done
-}
-
-check_networks_volumes(){
-  if ! $DOCKER_PRESENT; then
-    _warn "Networks & volumes: skipped (docker not present)"; ((WARN_COUNT++)); return
-  fi
-  if ! $DOCKER_RUNNING; then
-    _warn "Networks & volumes: docker not running; skip detailed checks"; ((WARN_COUNT++)); return
-  fi
-  _info "Docker networks:"
-  docker network ls --format "  {{.Name}}" || true
-  _info "Docker volumes:"
-  docker volume ls --format "  {{.Name}}" || true
-}
-
-check_nginx(){
-  if has_cmd nginx; then
-    if nginx -t >/dev/null 2>&1; then _ok "nginx config OK"; else _err "nginx config error"; ((ERR_COUNT++)); fi
-  else
-    _warn "nginx: not installed"; ((WARN_COUNT++))
-  fi
-}
-
-check_cloudflared(){
-  if has_cmd cloudflared; then
-    cloudflared --version 2>/dev/null || true
-    if systemctl is-active --quiet cloudflared; then _ok "cloudflared: running"; else _warn "cloudflared: installed but not running"; ((WARN_COUNT++)); fi
-  else
-    _warn "cloudflared: not installed"; ((WARN_COUNT++))
-  fi
-}
-
-check_webhook(){
-  if is_port_listening "$PORT"; then _ok "port $PORT: listening"; else _warn "port $PORT: not listening"; ((WARN_COUNT++)); fi
-  if has_cmd curl; then
-    if curl -sS --max-time 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then _ok "health endpoint OK"; else _warn "health endpoint not responding"; ((WARN_COUNT++)); fi
-  else
-    _warn "curl missing: cannot test health endpoint"; ((WARN_COUNT++))
-  fi
-}
-
-# ---------- install helpers ----------
-install_cloudflared_binary(){
-  _info "Installing cloudflared binary..."
+# cloudflared download via GitHub API (robust)
+cloudflared_download_and_install(){
   local arch
   arch=$(uname -m)
+  local file_arch
   case "$arch" in
-    x86_64|amd64) arch="amd64";;
-    aarch64|arm64) arch="arm64";;
-    *) arch="amd64";;
+    x86_64|amd64) file_arch="amd64";;
+    aarch64|arm64) file_arch="arm64";;
+    armv7l) file_arch="armv7";;
+    *) file_arch="amd64";;
   esac
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}.tgz"
-  if ! run_cmd curl -fsSL "$url" -o "$tmpdir/cloudflared.tgz"; then
-    _err "Failed to download cloudflared from $url"; ((ERR_COUNT++)); rm -rf "$tmpdir"; return 1
+  _info "Detected arch: $arch -> asset arch: $file_arch"
+
+  # need jq and curl
+  for c in curl jq; do
+    if ! has_cmd "$c"; then
+      if [[ "$PKG_MANAGER" != "unknown" ]]; then
+        pkg_install "$c" || _warn "Failed to install $c"
+      else
+        _warn "$c is required to download cloudflared automatically. Please install it manually."
+        return 1
+      fi
+    fi
+  done
+
+  _info "Fetching latest release data from GitHub API..."
+  local api_json
+  if ! api_json=$(curl -fsSL "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"); then
+    _err "Failed to fetch release metadata from GitHub API"
+    return 1
   fi
-  run_cmd tar -C "$tmpdir" -xzf "$tmpdir/cloudflared.tgz" || true
-  run_cmd mv "$tmpdir/cloudflared" /usr/local/bin/ || true
-  run_cmd chmod +x /usr/local/bin/cloudflared || true
-  rm -rf "$tmpdir"
-  _ok "cloudflared installed to /usr/local/bin/cloudflared"
+
+  local asset_url
+  # prefer tgz assets with linux and arch in name
+  asset_url=$(printf "%s" "$api_json" | jq -r --arg arch "$file_arch" \
+    '.assets[] | select(.name|test("linux.*" + $arch) and (.name|test("\\.tgz$") or .name|test("\\.tar.gz$"))) | .browser_download_url' \
+    | head -n1)
+
+  if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
+    _warn "No matching tgz asset found by API (arch=$file_arch). Listing available assets:"
+    printf "%s\n" "$api_json" | jq -r '.assets[] | "\(.name) \(.browser_download_url)"'
+    ((WARN_COUNT++))
+    return 1
+  fi
+
+  _info "Downloading cloudflared asset: $asset_url"
+  local tmpf="/tmp/cloudflared-$$.tgz"
+  if ! curl -fsSL "$asset_url" -o "$tmpf"; then
+    _err "Download failed for $asset_url"
+    rm -f "$tmpf" || true
+    return 1
+  fi
+
+  _info "Extracting and installing cloudflared to /usr/local/bin"
+  tar -C /tmp -xzf "$tmpf"
+  if [[ -f /tmp/cloudflared ]]; then
+    mv /tmp/cloudflared /usr/local/bin/cloudflared
+    chmod +x /usr/local/bin/cloudflared
+    rm -f "$tmpf"
+    _ok "cloudflared installed to /usr/local/bin/cloudflared"
+    return 0
+  else
+    _err "Unexpected archive format: cloudflared binary not found after extract"
+    ls -lah /tmp | sed -n '1,120p' || true
+    return 1
+  fi
 }
 
+# mkcert installation helpers
 install_mkcert(){
   if has_cmd mkcert; then _ok "mkcert already installed"; return 0; fi
-  _info "Installing mkcert..."
   case "$PKG_MANAGER" in
-    brew) run_cmd brew install mkcert nss || true;;
+    brew)
+      run_cmd brew install mkcert nss || true
+      ;;
     apt)
       pkg_install libnss3-tools || true
       local url="https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-$(uname -m)-linux"
@@ -397,7 +287,7 @@ install_mkcert(){
       run_cmd chmod +x /usr/local/bin/mkcert || true
       ;;
     *)
-      _warn "Please install mkcert manually for your OS"
+      _warn "mkcert install for $PKG_MANAGER not implemented; please install mkcert manually"
       return 1
       ;;
   esac
@@ -413,11 +303,10 @@ generate_mkcert_for_host(){
   _ok "mkcert: certificate generated for $host in $certdir"
 }
 
+# nginx config helpers
 configure_nginx_for_host(){
-  local host="$1"
-  local proxy_port="$2"
-  local confdir="/etc/nginx/sites-available"
-  local enabled="/etc/nginx/sites-enabled"
+  local host="$1"; local proxy_port="$2"
+  local confdir="/etc/nginx/sites-available"; local enabled="/etc/nginx/sites-enabled"
   mkdir -p "$confdir" "$enabled"
   local conf="$confdir/viavds-$host.conf"
   cat > "$conf" <<EOF
@@ -439,11 +328,8 @@ EOF
 }
 
 configure_nginx_with_tls(){
-  local host="$1"
-  local proxy_port="$2"
-  local confdir="/etc/nginx/sites-available"
-  local enabled="/etc/nginx/sites-enabled"
-  local certdir="/etc/viavds/certs"
+  local host="$1"; local proxy_port="$2"
+  local confdir="/etc/nginx/sites-available"; local enabled="/etc/nginx/sites-enabled"; local certdir="/etc/viavds/certs"
   mkdir -p "$confdir" "$enabled" "$certdir"
   local conf="$confdir/viavds-$host.conf"
   cat > "$conf" <<EOF
@@ -473,11 +359,9 @@ EOF
   _ok "nginx with TLS configured for $host"
 }
 
-# cloudflared prepare
+# prepare cloudflared config skeleton
 prepare_cloudflared_config(){
-  local tunnel_name="$1"
-  local tunnel_port="$2"
-  local hostname="$3"
+  local tunnel_name="$1"; local tunnel_port="$2"; local hostname="$3"
   mkdir -p /etc/cloudflared
   cat > /etc/cloudflared/config.yml <<EOF
 tunnel: $tunnel_name
@@ -488,52 +372,129 @@ ingress:
     service: http://127.0.0.1:$tunnel_port
   - service: http_status:404
 EOF
-  _ok "Prepared /etc/cloudflared/config.yml ingress for $hostname -> 127.0.0.1:$tunnel_port"
   chown -R root:root /etc/cloudflared || true
+  _ok "Prepared /etc/cloudflared/config.yml ingress for $hostname -> 127.0.0.1:$tunnel_port"
 }
 
-# ---------- installer main ----------
+# hosts helper (adds local hosts so wh.vianl.loc resolves locally)
+add_hosts_entry(){
+  local host="$1"
+  local ip="${2:-127.0.0.1}"
+  if grep -qE "^[^#]*\s+$host(\s|$)" /etc/hosts 2>/dev/null; then
+    _info "Host $host already present in /etc/hosts"
+    return 0
+  fi
+  echo "$ip $host" >> /etc/hosts
+  _ok "Added /etc/hosts entry: $ip $host"
+}
+
+# docker checks
+check_docker(){
+  if ! has_cmd docker; then
+    _warn "docker: not installed"
+    ((WARN_COUNT++))
+    DOCKER_PRESENT=false; DOCKER_RUNNING=false; return 1
+  fi
+  DOCKER_PRESENT=true
+  if pgrep -x dockerd >/dev/null 2>&1 || (has_cmd systemctl && systemctl is-active --quiet docker); then
+    _ok "docker daemon: running"
+    DOCKER_RUNNING=true
+  else
+    _warn "docker daemon: not running"
+    DOCKER_RUNNING=false
+    ((WARN_COUNT++))
+  fi
+}
+
+check_compose(){
+  if has_cmd docker && docker compose version >/dev/null 2>&1; then _ok "docker compose: present"
+  else _warn "docker compose (v2) not present"; ((WARN_COUNT++)); fi
+}
+
+check_viavds_container(){
+  if [[ "${DOCKER_PRESENT:-false}" != true ]]; then
+    _warn "viavds container: check skipped (docker not present)"; ((WARN_COUNT++)); return
+  fi
+  local info
+  info=$(docker ps --filter "name=viavds" --format "name={{.Names}} status={{.Status}} ports={{.Ports}}" | head -n1 || true)
+  if [[ -n "$info" ]]; then _ok "viavds container: $info"; return 0; fi
+  info=$(docker ps -a --filter "name=viavds" --format "name={{.Names}} status={{.Status}}" | head -n1 || true)
+  if [[ -n "$info" ]]; then _warn "viavds container present but stopped: $info"; ((WARN_COUNT++)); else _warn "viavds container not found"; ((WARN_COUNT++)); fi
+}
+
+check_images(){
+  local dir="$1"
+  if [[ -z "$dir" || ! -f "$dir/docker-compose.yml" ]]; then _warn "Images: skip (no compose file)"; ((WARN_COUNT++)); return; fi
+  if [[ "${DOCKER_PRESENT:-false}" != true ]]; then _warn "Images: skipped (docker not present)"; ((WARN_COUNT++)); return; fi
+  local imgs; imgs=( $(awk '/image:/ {print $2}' "$dir/docker-compose.yml" || true) )
+  if [[ ${#imgs[@]} -eq 0 ]]; then _warn "Images: none declared in compose"; ((WARN_COUNT++)); return; fi
+  for im in "${imgs[@]}"; do
+    if docker image inspect "$im" >/dev/null 2>&1; then _ok "Image present: $im"; else _warn "Image missing: $im"; ((WARN_COUNT++)); fi
+  done
+}
+
+check_networks_volumes(){
+  if [[ "${DOCKER_PRESENT:-false}" != true ]]; then _warn "Networks & volumes: skipped (docker not present)"; ((WARN_COUNT++)); return; fi
+  if [[ "${DOCKER_RUNNING:-false}" != true ]]; then _warn "Networks & volumes: docker not running; skip detailed checks"; ((WARN_COUNT++)); return; fi
+  _info "Docker networks:"; docker network ls --format "  {{.Name}}" || true
+  _info "Docker volumes:"; docker volume ls --format "  {{.Name}}" || true
+}
+
+check_nginx(){
+  if has_cmd nginx; then
+    if nginx -t >/dev/null 2>&1; then _ok "nginx config OK"; else _err "nginx config error"; ((ERR_COUNT++)); fi
+  else _warn "nginx: not installed"; ((WARN_COUNT++)); fi
+}
+
+check_cloudflared(){
+  if has_cmd cloudflared; then
+    cloudflared --version 2>/dev/null || true
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then _ok "cloudflared: running"; else _warn "cloudflared: installed but not running"; ((WARN_COUNT++)); fi
+  else _warn "cloudflared: not installed"; ((WARN_COUNT++)); fi
+}
+
+check_webhook(){
+  if is_port_listening "$PORT"; then _ok "port $PORT: listening"; else _warn "port $PORT: not listening"; ((WARN_COUNT++)); fi
+  if has_cmd curl; then
+    if curl -sS --max-time 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then _ok "health endpoint OK"; else _warn "health endpoint not responding"; ((WARN_COUNT++)); fi
+  else _warn "curl missing: cannot test health endpoint"; ((WARN_COUNT++)); fi
+}
+
+# installer main routine
 do_install(){
   detect_pkg_manager
   _info "Package manager: ${PKG_MANAGER:-unknown}"
-
   local ENV
   ENV=$(detect_environment)
   _info "Environment detected: $ENV"
 
-  # If WSL or macOS -> do not attempt to install docker engine
+  # if local WSL or macOS -> avoid apt-installing docker engine
   if [[ "$ENV" == local* ]]; then
     _info "Local environment detected ($ENV) — Docker Engine installation via package manager will be skipped."
-    if [[ "$ALLOW_INSTALL_DOCKER" == true ]]; then
-      _warn "--install-docker was requested but skipped on local env (WSL/macos). Please install Docker Desktop on host and enable WSL integration."
+    if $ALLOW_INSTALL_DOCKER; then
+      _warn "--install-docker was requested but will be skipped for local environment. On WSL/macOS please install Docker Desktop and enable integration."
     fi
   fi
 
-  # install minimal tools (curl, git, ca-certificates, jq)
+  # ensure basic tools
   pkg_install curl git ca-certificates jq || true
-
-  # install qrencode quietly (we print QR for activate_url)
   pkg_install qrencode || true
 
-  # cloudflared binary
+  # cloudflared install (if requested or missing)
   if ! has_cmd cloudflared; then
-    install_cloudflared_binary || _warn "cloudflared install failed"
-  else
-    _ok "cloudflared already installed"
-  fi
+    if cloudflared_download_and_install; then _ok "cloudflared installed"; else _warn "cloudflared install failed (see above)"; fi
+  else _ok "cloudflared present"; fi
 
-  # mkcert (if requested)
+  # mkcert
   if $DO_MKCERT; then
     install_mkcert || _warn "mkcert install failed"
   fi
 
-  # PROJECT_DIR default for install
-  if [[ -z "$PROJECT_DIR" ]]; then
-    PROJECT_DIR="/opt/viavds"
-  fi
+  # project dir
+  if [[ -z "$PROJECT_DIR" ]]; then PROJECT_DIR="/opt/viavds"; fi
   mkdir -p "$PROJECT_DIR"
 
-  # clone repo if needed
+  # clone repo (prefer https)
   if [[ -d "$PROJECT_DIR/.git" ]]; then
     _info "Project already present at $PROJECT_DIR"
   else
@@ -543,94 +504,69 @@ do_install(){
     fi
   fi
 
-  # Docker pre-check
+  # docker sanity check
   if ! has_cmd docker; then
-    if [[ "$ENV" == local* ]]; then
-      _err "Docker not found in local environment. On WSL/macOS you must install Docker Desktop (Windows) or Docker Desktop / Docker for Mac (macOS) and enable WSL integration."
-      _err "Installation cannot proceed without Docker. Please install Docker Desktop and re-run the installer."
-      exit 3
-    else
-      # public server: allow automatic installation if requested
-      if $ALLOW_INSTALL_DOCKER || $ASSUME_YES; then
-        _info "Attempting to install Docker on public server..."
-        case "$PKG_MANAGER" in
-          apt)
-            run_cmd apt-get update -qq || true
-            run_cmd apt-get install -y -qq ca-certificates gnupg lsb-release apt-transport-https || true
-            run_cmd mkdir -p /etc/apt/keyrings || true
-            if run_cmd curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
-              run_cmd echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null || true
-              run_cmd apt-get update -qq || true
-              run_cmd apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
-            else
-              _err "GPG import failed for Docker repo — automatic docker install aborted."
-              ((ERR_COUNT++))
-            fi
-            ;;
-          apk)
-            pkg_install docker docker-compose || true
-            ;;
-          *)
-            _warn "Automatic docker install not implemented for $PKG_MANAGER; please install docker manually."
-            ;;
-        esac
-        run_cmd systemctl enable --now docker || true
-        if ! has_cmd docker; then
-          _err "docker still not available after automatic install attempt; aborting."
-          exit 4
+    if [[ "$ENV" == "local (wsl)" ]] && $ASSUME_YES; then
+      # try to install Docker Desktop on Windows using winget if available (best-effort)
+      if has_cmd powershell.exe && (powershell.exe -Command "Get-Command winget" >/dev/null 2>&1); then
+        _info "Attempting to install Docker Desktop on Windows via winget (requires Windows & winget). This may take a while."
+        # run winget via powershell (not automatic if interactive required)
+        if $DRY_RUN; then
+          echo "[DRYRUN] powershell.exe -Command 'winget install -e --id Docker.DockerDesktop -h'"
+        else
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "winget install -e --id Docker.DockerDesktop -h" || _warn "winget install failed or requires user interaction"
+          # after install, require user to enable WSL integration
+          _info "Please enable WSL integration in Docker Desktop settings, then run 'wsl --shutdown' and retry."
         fi
       else
-        _err "Docker is required. Re-run with --install-docker or install Docker manually."
-        exit 5
+        _warn "Automatic Docker Desktop install via winget is not available. Please install Docker Desktop on Windows manually."
       fi
+    else
+      _warn "Docker is not installed. On public servers we can attempt installation with --install-docker if desired."
+      ((WARN_COUNT++))
     fi
   else
     _ok "docker present"
   fi
 
-  # Check docker compose availability
-  if has_cmd docker && ! docker compose version >/dev/null 2>&1; then
-    _warn "docker compose v2 plugin not available. Ensure docker compose v2 plugin is installed and accessible as 'docker compose'."
-  fi
+  # docker compose note
+  if has_cmd docker && ! docker compose version >/dev/null 2>&1; then _warn "docker compose v2 plugin not available"; fi
 
-  # mkcert certificates generation for webhook-host (local)
+  # mkcert cert generation and nginx config
   if $DO_MKCERT && [[ -n "$WEBHOOK_HOST" ]]; then
-    generate_mkcert_for_host "$WEBHOOK_HOST" || _warn "mkcert generation failed"
+    generate_mkcert_for_host "$WEBHOOK_HOST" || _warn "mkcert failed"
     configure_nginx_with_tls "$WEBHOOK_HOST" "$PORT" || _warn "nginx TLS config failed"
+    add_hosts_entry "$WEBHOOK_HOST" "127.0.0.1"
   elif [[ -n "$WEBHOOK_HOST" ]]; then
-    # configure nginx (plain http)
-    if has_cmd nginx; then
-      configure_nginx_for_host "$WEBHOOK_HOST" "$PORT" || _warn "nginx config failed"
-    else
-      _warn "nginx not installed; skipping vhost creation"
-    fi
+    if has_cmd nginx; then configure_nginx_for_host "$WEBHOOK_HOST" "$PORT"; add_hosts_entry "$WEBHOOK_HOST" "127.0.0.1"; else _warn "nginx not installed; skipping vhost creation"; fi
   fi
 
-  # cloudflared tunnel prepare (config only)
   if [[ -n "$TUNNEL_HOST" ]]; then
     local tname="viavds-$(hostname -s)-$(date +%s)"
     prepare_cloudflared_config "$tname" "$PORT" "$TUNNEL_HOST"
-    _info "Prepared cloudflared config. Next steps (interactive):"
+    _info "Prepared cloudflared config. Next interactive steps:"
     echo
     echo "  1) As a non-root user run: cloudflared tunnel login"
-    echo "     This will open a browser or print an activation URL. Use activate_url <url> to display it with QR in terminal."
+    echo "     Use activate_url <url> to print activation URL + QR in terminal."
     echo
     echo "  2) Then create tunnel and route DNS:"
     echo "     cloudflared tunnel create $tname"
     echo "     cloudflared tunnel route dns $tname $TUNNEL_HOST"
     echo
-    echo "  3) Move the credential JSON to /etc/cloudflared and enable service:"
-    echo "     sudo mv /home/<user>/.cloudflared/$tname.json /etc/cloudflared/$tname.json"
+    echo "  3) Move credential JSON to /etc/cloudflared and enable service:"
+    echo "     sudo mv ~/.cloudflared/$tname.json /etc/cloudflared/$tname.json"
     echo "     sudo systemctl enable --now cloudflared"
     echo
   fi
 
-  # run docker compose (if compose file present)
+  # docker-compose up if we have docker and compose and compose file
   if [[ -f "$PROJECT_DIR/docker-compose.yml" ]]; then
-    _info "Starting docker-compose in $PROJECT_DIR"
-    run_cmd bash -c "cd $PROJECT_DIR && docker compose up -d --build" || _warn "docker compose up failed"
+    if has_cmd docker && docker compose version >/dev/null 2>&1; then
+      _info "Starting docker compose in $PROJECT_DIR"
+      run_cmd bash -c "cd $PROJECT_DIR && docker compose up -d --build" || _warn "docker compose up failed"
+    else
+      _warn "Skipping docker compose start: docker/docker-compose not ready"
+    fi
   else
     _warn "docker-compose.yml not found in $PROJECT_DIR; skipping docker compose start"
   fi
@@ -638,7 +574,62 @@ do_install(){
   _ok "Install sequence finished (check summary below)."
 }
 
-# ---------- main status and install ----------
+# status command
+cmd_status(){
+  _info "=== viavds STATUS CHECK ==="
+  detect_pkg_manager
+  _info "Package manager: ${PKG_MANAGER:-unknown}"
+  local ENV; ENV=$(detect_environment)
+  _info "Environment: $ENV"
+  for c in curl jq git; do
+    if has_cmd "$c"; then _ok "$c: ok"; else _warn "$c: missing"; ((WARN_COUNT++)); fi
+  done
+  check_docker || true
+  check_compose
+  PROJECT_DIR=$(find_project_dir || true)
+  _info "Project dir: ${PROJECT_DIR:-not found}"
+  check_viavds_container
+  check_images "$PROJECT_DIR"
+  check_networks_volumes
+  check_nginx
+  check_cloudflared
+  check_webhook
+  echo
+  _info "SUMMARY:"
+  _info " Project dir: ${PROJECT_DIR:-not found}"
+  _info " Environment: $ENV"
+  _info " Webhook host: ${WEBHOOK_HOST:-not set}"
+  _info " Tunnel host: ${TUNNEL_HOST:-not set}"
+  if (( ERR_COUNT > 0 )); then _err "Errors: $ERR_COUNT"; fi
+  if (( WARN_COUNT > 0 )); then _warn "Warnings: $WARN_COUNT"; else _ok "No warnings"; fi
+}
+
+cmd_install(){
+  _info "=== viavds INSTALL ==="
+  do_install
+  echo
+  _info "FINAL SUMMARY:"
+  _info "webhook-host: ${WEBHOOK_HOST:-not set}"
+  _info "tunnel-host: ${TUNNEL_HOST:-not set}"
+  _info "project dir: ${PROJECT_DIR:-not set}"
+  if (( ERR_COUNT > 0 )); then _err "Errors: $ERR_COUNT (see logs)"; fi
+  if (( WARN_COUNT > 0 )); then _warn "Warnings: $WARN_COUNT"; else _ok "No warnings"; fi
+}
+
+# simple activate_url helper (prints url + QR via qrencode if present)
+activate_url(){
+  local url
+  if [ "$#" -ge 1 ] && [ -n "$1" ]; then url="$1"; else url="$(cat - 2>/dev/null)"; fi
+  url="${url#"${url%%[![:space:]]*}"}"
+  url="${url%"${url##*[![:space:]]}"}"
+  printf '\nДля активации сервиса перейдите по ссылке %s\n\n' "$url"
+  if has_cmd qrencode; then
+    qrencode -o - -t UTF8 "$url" 2>/dev/null || qrencode -o - -t ANSIUTF8 "$url" 2>/dev/null || true
+    printf '\n'
+  fi
+}
+
+# parse args
 while [[ $# -gt 0 ]]; do
   case "$1" in
     status|install) CMD="$1"; shift;;
@@ -648,7 +639,6 @@ while [[ $# -gt 0 ]]; do
     --webhook-host) WEBHOOK_HOST="$2"; shift 2;;
     --tunnel-host) TUNNEL_HOST="$2"; shift 2;;
     --cf-token) CF_TOKEN="$2"; shift 2;;
-    --cf-account) CF_ACCOUNT="$2"; shift 2;;
     --port) PORT="$2"; shift 2;;
     --mkcert) DO_MKCERT=true; shift;;
     --cf-tunnel) DO_CFTUNNEL=true; shift;;
@@ -661,49 +651,6 @@ while [[ $# -gt 0 ]]; do
     *) _err "Unknown arg: $1"; usage;;
   esac
 done
-
-cmd_status(){
-  _info "=== viavds status ==="
-  detect_pkg_manager
-  _info "Package manager: ${PKG_MANAGER:-unknown}"
-  ENV=$(detect_environment)
-  _info "Environment: $ENV"
-  check_basic_tools
-  check_docker || true
-  check_compose
-  PROJECT_DIR=$(find_project_dir || true)
-  _info "Project dir: ${PROJECT_DIR:-not found}"
-  check_viavds_container
-  check_images "$PROJECT_DIR"
-  check_networks_volumes
-  check_nginx
-  check_cloudflared
-  check_webhook
-  # summary
-  echo
-  _info "SUMMARY:"
-  _info " Project dir: ${PROJECT_DIR:-not found}"
-  _info " Environment: $ENV"
-  _info " Webhook host: ${WEBHOOK_HOST:-not set}"
-  _info " Tunnel host: ${TUNNEL_HOST:-not set}"
-  if (( ERR_COUNT > 0 )); then _err "Errors: $ERR_COUNT"; fi
-  if (( WARN_COUNT > 0 )); then _warn "Warnings: $WARN_COUNT"; else _ok "No warnings"; fi
-}
-
-cmd_install(){
-  _info "=== viavds install ==="
-  detect_pkg_manager
-  _info "Package manager: ${PKG_MANAGER:-unknown}"
-  do_install
-  # final summary
-  echo
-  _info "FINAL SUMMARY:"
-  _info "webhook-host: ${WEBHOOK_HOST:-not set}"
-  _info "tunnel-host: ${TUNNEL_HOST:-not set}"
-  _info "project dir: ${PROJECT_DIR:-not set}"
-  if (( ERR_COUNT > 0 )); then _err "Errors: $ERR_COUNT (see logs)"; fi
-  if (( WARN_COUNT > 0 )); then _warn "Warnings: $WARN_COUNT"; else _ok "No warnings"; fi
-}
 
 case "$CMD" in
   status) cmd_status;;
