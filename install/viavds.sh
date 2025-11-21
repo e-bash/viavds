@@ -20,7 +20,7 @@ SCRIPT_NAME="$(basename "$0")"
 LOG_FILE=""
 VERBOSE=false
 DRY_RUN=false
-
+SUDO_USER="$USER"
 _info(){ printf "\e[1;34m%s\e[0m\n" "$*"; }
 _ok(){ printf "\e[1;32m%s\e[0m\n" "$*"; }
 _warn(){ printf "\e[1;33m%s\e[0m\n" "$*"; }
