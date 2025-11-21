@@ -284,5 +284,5 @@ Telegram:
 ### Проверка статуса viavds
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh)"
 ```
