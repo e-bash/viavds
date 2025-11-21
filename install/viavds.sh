@@ -75,7 +75,7 @@ fi
 CMD="status"
 PROJECT_DIR=""
 REPO_URL="https://github.com/e-bash/viavds.git"
-BRANCH="main"
+BRANCH="master"
 WEBHOOK_HOST=""
 TUNNEL_HOST=""
 CF_TOKEN=""
