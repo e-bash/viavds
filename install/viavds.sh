@@ -249,8 +249,8 @@ cloudflared_install_via_repo(){
   if [[ -z "$codename" ]]; then codename="$(cut -d' ' -f1 /etc/os-release | head -n1 || echo 'focal')"; fi
 
   _info "Attempting install from pkg.cloudflareclient.com (apt) for distro: $codename"
-  run_cmd "curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-client-archive-keyring.gpg" || true
-  echo "deb [signed-by=/usr/share/keyrings/cloudflare-client-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${codename} main" | sudo_run "tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null" || true
+  run_cmd "curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg -- -o /usr/share/keyrings/cloudflare-client-archive-keyring.gpg" || true
+  sudo echo "deb [signed-by=/usr/share/keyrings/cloudflare-client-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${codename} main" | sudo_run "tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null" || true
   sudo_run "apt-get update -qq" || true
   if sudo_run "apt-get install -y -qq cloudflared"; then
     _ok "cloudflared installed via apt repo"
