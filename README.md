@@ -39,6 +39,10 @@
 
 ### 1) Универсальная (рекомендуемая — работает в WSL/Ubuntu/macOS)
 
+sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- install --dir /home/ssuprunov/viavds --webhook-host wh.vianl.loc --tunnel-host ngrok.vianl.loc --mkcert --cf-tunnel --yes'
+
+
+
 ```bash
 sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s --'
 ```
