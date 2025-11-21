@@ -276,3 +276,15 @@ Pull Requests приветствуются!
 
 Email: [ops@viavds.com](mailto:ops@viavds.com)  
 Telegram:
+
+
+---
+---
+
+### Проверка статуса viavds
+
+```bash
+curl -sSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh -o viavds.sh
+chmod +x viavds.sh
+sudo ./viavds.sh
+```
