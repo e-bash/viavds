@@ -307,8 +307,13 @@ cmd_status(){
   _ok "STATUS COMPLETE."
 }
 
-cmd_install_public(){ _warn "(install-public mode not implemented yet)" }
-cmd_install_local(){ _warn "(install-local mode not implemented yet)" }
+cmd_install_public(){
+  _warn "(install-public mode not implemented yet)"
+}
+
+cmd_install_local(){
+  _warn "(install-local mode not implemented yet)"
+}
 
 # ----------------------------------------
 # DISPATCH
