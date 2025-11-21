@@ -35,89 +35,41 @@
 
 ---
 
-Понял, сейчас объясню простыми словами + дам полный набор команд с параметрами.
+Команды запуска (примеры)
 
----
-
-# 🟦 Полный набор универсальных команд запуска `viavds.sh`
-
-## ✔ Запуск по умолчанию (`status`)
+### 1) Универсальная (рекомендуемая — работает в WSL/Ubuntu/macOS)
 
 ```bash
 sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s --'
 ```
 
-Это вызовет:
+### 2) Запуск с параметрами
 
-```
-bash viavds.sh status
-```
-
----
-
-## ✔ Запуск с параметрами
-
-### ▶ Статус с повышенной детализацией
-
-```bash
-sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- status --verbose'
-```
-
-### ▶ Статус с указанием каталога проекта
+- Путь к проекту:
 
 ```bash
 sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- status --dir /opt/viavds'
 ```
 
-### ▶ Статус с указанием порта
+- Явно указать порт:
 
 ```bash
 sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- status --port 18080'
 ```
 
----
-
-# 🟩 3. Запуск режима установки на публичный сервер
-
-Когда будет реализован `install-public`, его вызов будет таким:
+- Вербозный режим:
 
 ```bash
-sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- install-public'
+sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- status --verbose'
 ```
 
-С параметрами:
+### 3) Надёжный вариант (сохранить во временный файл и запустить)
 
 ```bash
-sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- install-public --dir /opt/viavds --port 14127 --yes'
+curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh -o /tmp/viavds.sh && sudo bash /tmp/viavds.sh status
 ```
 
 ---
-
-# 🟧 4. Запуск режима локальной разработки
-
-Когда реализуем `install-local`:
-
-```bash
-sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh | bash -s -- install-local'
-```
-
----
-
-# 🟦 5. Надёжный вариант, если ты хочешь сохранить файл локально
-
-Это полностью исключает любые проблемы среды:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh -o /tmp/viavds.sh
-sudo bash /tmp/viavds.sh status
-```
-
-или
-
-```bash
-sudo bash /tmp/viavds.sh install-local --verbose
-```
-
 
 # 🚀 Установка одной командой (VDS или сервер Linux)
 

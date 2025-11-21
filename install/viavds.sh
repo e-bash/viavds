@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # viavds.sh -- diagnostics & installer scaffold for viavds
-# Updated: environment detection, conditional checks, colored results (ok/warn/err)
+# Updated: package manager detection + status output
 set -euo pipefail
 IFS=$'\n\t'
 
-VER="0.3.0"
+VER="0.4.0"
 SCRIPT_NAME=$(basename "$0")
 
 # Colors and helpers
@@ -36,7 +36,7 @@ EOF
   exit 0
 }
 
-# Auto-elevate to root if possible (like before)
+# Auto-elevate to root if possible
 if [[ $EUID -ne 0 ]]; then
   if command -v sudo >/dev/null 2>&1; then
     exec sudo bash "$0" "$@"
@@ -69,6 +69,50 @@ run(){
 }
 
 PROJECT_DIRS=( "." "/opt/viavds" "/srv/viavds" "$HOME/viavds" )
+
+# -----------------------------
+# Package manager detection
+# Sets:
+#   PKG_MANAGER (brew/apt/dnf/yum/pacman/apk/zypper/unknown)
+#   PKG_INSTALL_CMD (e.g. apt-get install -y)
+#   PKG_UPDATE_CMD  (e.g. apt-get update)
+# -----------------------------
+detect_pkg_manager(){
+  PKG_MANAGER="unknown"
+  PKG_INSTALL_CMD=""
+  PKG_UPDATE_CMD=""
+  if has_cmd brew; then
+    PKG_MANAGER="brew"
+    PKG_INSTALL_CMD="brew install"
+    PKG_UPDATE_CMD="brew update"
+  elif has_cmd apt-get; then
+    PKG_MANAGER="apt"
+    PKG_INSTALL_CMD="apt-get install -y"
+    PKG_UPDATE_CMD="apt-get update"
+  elif has_cmd dnf; then
+    PKG_MANAGER="dnf"
+    PKG_INSTALL_CMD="dnf install -y"
+    PKG_UPDATE_CMD="dnf makecache"
+  elif has_cmd yum; then
+    PKG_MANAGER="yum"
+    PKG_INSTALL_CMD="yum install -y"
+    PKG_UPDATE_CMD="yum makecache"
+  elif has_cmd pacman; then
+    PKG_MANAGER="pacman"
+    PKG_INSTALL_CMD="pacman -S --noconfirm"
+    PKG_UPDATE_CMD="pacman -Sy"
+  elif has_cmd apk; then
+    PKG_MANAGER="apk"
+    PKG_INSTALL_CMD="apk add --no-cache"
+    PKG_UPDATE_CMD="apk update"
+  elif has_cmd zypper; then
+    PKG_MANAGER="zypper"
+    PKG_INSTALL_CMD="zypper install -y"
+    PKG_UPDATE_CMD="zypper refresh"
+  else
+    PKG_MANAGER="unknown"
+  fi
+}
 
 # ----------------------------------------
 # ARG PARSER
@@ -152,21 +196,17 @@ detect_environment(){
     return
   fi
 
-  # Docker in container? (if in container and no public IP -> local)
-  # Try to obtain public IP (short timeout); if none -> local
+  local pubip=""
   if has_cmd curl; then
-    PUBIP=$(curl -fsS --max-time 2 https://ifconfig.co || true)
-  else
-    PUBIP=""
+    pubip=$(curl -fsS --max-time 2 https://ifconfig.co || true)
   fi
 
-  if [[ -z "$PUBIP" ]]; then
+  if [[ -z "$pubip" ]]; then
     echo "local"
     return
   fi
 
-  # Check if public ip is actually private (safety)
-  if [[ "$PUBIP" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1]) ]]; then
+  if [[ "$pubip" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1]) ]]; then
     echo "local"
   else
     echo "public"
@@ -228,6 +268,7 @@ check_viavds_container(){
   if ! $DOCKER_PRESENT; then
     _warn "viavds container: skipped (docker not present)"
     ((WARN_COUNT++))
+    VIAVDS_SUMMARY="skipped"
     return
   fi
 
@@ -235,6 +276,7 @@ check_viavds_container(){
   r=$(docker ps --filter "name=viavds" --format "{{.Names}}||{{.Status}}||{{.Ports}}" || true)
   if [[ -n "$r" ]]; then
     _ok "viavds container: running -> ${r}"
+    VIAVDS_SUMMARY="running -> ${r}"
     return
   fi
 
@@ -242,11 +284,13 @@ check_viavds_container(){
   a=$(docker ps -a --filter "name=viavds" --format "{{.Names}}||{{.Status}}" || true)
   if [[ -n "$a" ]]; then
     _warn "viavds container: present but not running -> ${a}"
+    VIAVDS_SUMMARY="present but not running -> ${a}"
     ((WARN_COUNT++))
     return
   fi
 
   _warn "viavds container: not found"
+  VIAVDS_SUMMARY="not found"
   ((WARN_COUNT++))
 }
 
@@ -301,9 +345,20 @@ check_networks_volumes(){
   fi
 
   _info "Existing docker networks:"
-  docker network ls --format "  {{.Name}}" || _warn "Failed to list networks" && ((ERR_COUNT++))
+  if ! docker network ls --format "  {{.Name}}" >/dev/null 2>&1; then
+    _err "Failed to list docker networks"
+    ((ERR_COUNT++))
+  else
+    docker network ls --format "  {{.Name}}" || true
+  fi
+
   _info "Existing docker volumes:"
-  docker volume ls --format "  {{.Name}}" || _warn "Failed to list volumes" && ((ERR_COUNT++))
+  if ! docker volume ls --format "  {{.Name}}" >/dev/null 2>&1; then
+    _err "Failed to list docker volumes"
+    ((ERR_COUNT++))
+  else
+    docker volume ls --format "  {{.Name}}" || true
+  fi
 }
 
 # ----------------------------------------
@@ -326,7 +381,6 @@ check_nginx(){
     _info "nginx vhosts (sites-enabled):"
     ls -1 /etc/nginx/sites-enabled || true
   else
-    # best-effort show some server blocks
     nginx -T 2>/dev/null | sed -n '1,120p' || true
   fi
 }
@@ -402,6 +456,11 @@ print_summary(){
   _info "SUMMARY:"
   _info " Project dir: ${PROJECT_DIR:-(not found)}"
   _info " Environment: ${ENV_TYPE:-unknown}"
+  _info " Package manager: ${PKG_MANAGER:-unknown}"
+  if [[ "${PKG_MANAGER:-unknown}" != "unknown" ]]; then
+    _info " Package install cmd: ${PKG_INSTALL_CMD}"
+    _info " Package update cmd:  ${PKG_UPDATE_CMD}"
+  fi
   if $DOCKER_PRESENT 2>/dev/null; then
     _info " Docker: present"
     [[ $DOCKER_RUNNING == true ]] && _info " Docker daemon: running" || _warn " Docker daemon: not running"
@@ -426,6 +485,9 @@ print_summary(){
 # ----------------------------------------
 cmd_status(){
   _info "=== VIAVDS STATUS CHECK ==="
+
+  # detect package manager early
+  detect_pkg_manager
 
   ENV_TYPE=$(detect_environment)
   _info "Environment detected: $ENV_TYPE"
