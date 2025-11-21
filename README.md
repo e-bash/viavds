@@ -283,6 +283,24 @@ Telegram:
 
 ### Проверка статуса viavds
 
+
+## Быстрый старт
+
+Запуск диагностики:
+
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh)"
+    sudo bash <(curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh)
+```
+
+
+Установка для VDS (когда будет готова):
+
+```bash
+    sudo bash <(curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh) install-public
+```
+
+Установка локальной разработки:
+
+```bash
+    sudo bash <(curl -fsSL https://raw.githubusercontent.com/e-bash/viavds/master/install/viavds.sh) install-local
 ```
