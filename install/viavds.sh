@@ -167,6 +167,7 @@ pkg_install(){
       fi
       # build full install command
       local full_cmd="$PKG_INSTALL_CMD ${pkgs[*]}"
+      echo "$full_cmd\n\r"
       if ! sudo_run "$full_cmd"; then
         _err "Failed to install packages: ${pkgs[*]}"
         ((ERR_COUNT++)); return 1
